@@ -1,5 +1,7 @@
 from uuid import UUID
 
+from fastapi.responses import FileResponse
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.core.exceptions import ValidationError
@@ -135,3 +137,14 @@ async def chat(
         sources=result["sources"],
         confidence=result["confidence"],
     )
+
+@router.get("/uploads/{video_id}/video.mp4")
+async def serve_video(video_id: str):
+    from app.core.config import settings
+    from pathlib import Path
+
+    file_path = Path(settings.UPLOAD_DIR) / video_id / "video.mp4"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    return FileResponse(str(file_path), media_type="video/mp4")

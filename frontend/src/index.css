@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-sentinel-900 text-sentinel-100;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-sentinel-800;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-sentinel-600 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-sentinel-500;
+}
