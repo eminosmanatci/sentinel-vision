@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   db:
     image: ankane/pgvector:latest
@@ -59,6 +57,24 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
     command: npm run dev
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-celery
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://sentinel:sentinel_secret@db:5432/sentinel_vision
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=development
+    command: celery -A app.infrastructure.tasks.celery_app worker --loglevel=info --concurrency=2
 
 volumes:
   postgres_data:

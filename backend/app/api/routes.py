@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
 
 from app.core.exceptions import SentinelException, ValidationError
-from app.dependencies import get_video_service
+from app.core.logging import logger
+from app.dependencies import get_processing_service, get_video_service
+from app.infrastructure.tasks.video_tasks import process_video_task
 from app.schemas.video import VideoListResponse, VideoResponse, VideoUploadResponse
+from app.services.processing_service import ProcessingService
 from app.services.video_service import VideoService
 
 router = APIRouter(prefix="/api/v1", tags=["videos"])
@@ -15,22 +17,21 @@ async def upload_video(
     video_service: VideoService = Depends(get_video_service),
 ) -> VideoUploadResponse:
     try:
-        # Validate
         file.file.seek(0, 2)
         file_size = file.file.tell()
         file.file.seek(0)
 
         video_service.validate_file(file.filename or "unknown", file_size)
 
-        # Create record
         video = await video_service.create_upload(file.filename or "unknown")
 
-        # Save file
+        content = await file.read()
         with open(video.file_path, "wb") as f:
-            content = await file.read()
             f.write(content)
 
-        # TODO: Trigger background processing (Adım 3)
+        # Trigger background processing
+        process_video_task.delay(str(video.id))
+        logger.info(f"Background task queued for video: {video.id}")
 
         return VideoUploadResponse(
             id=video.id,
@@ -88,5 +89,5 @@ async def get_video(
         resolution=video.resolution,
         status=video.status.value,
         created_at=video.created_at,
-        processed_at=video.processed_at,
+        processed_at=VideoListResponse.processed_at,
     )

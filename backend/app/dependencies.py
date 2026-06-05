@@ -1,14 +1,15 @@
-from fastapi import Depends, Request
+from fastapi import Depends
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database.repositories import (
     SQLDetectionRepository,
     SQLVideoRepository,
-    get_db,
 )
+from app.infrastructure.database.session import get_db
 from app.repositories.base import DetectionRepository, VideoRepository
-from app.services.video_service import VideoService
 from app.services.processing_service import ProcessingService
+from app.services.video_service import VideoService
 
 
 async def get_video_repository(
