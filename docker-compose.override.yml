@@ -1,0 +1,7 @@
+version: "3.8"
+
+services:
+  backend:
+    environment:
+      - LOG_LEVEL=debug
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
