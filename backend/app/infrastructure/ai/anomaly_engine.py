@@ -1,3 +1,10 @@
+"""Rule-based anomaly detection engine for security footage analysis.
+
+Detects suspicious patterns: night intrusions, restricted zone entries,
+abandoned objects, and loitering behavior. Designed to be stateless
+for safe concurrent execution in Celery workers.
+"""
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -5,8 +12,16 @@ from app.core.logging import logger
 from app.domain.entities import AnomalyType
 
 
-@dataclass
+@dataclass(frozen=True)
 class DetectionContext:
+    """Immutable context for a single detection event.
+
+    Attributes:
+        timestamp: Video timestamp in seconds.
+        object_class: Detected object class (e.g., "person", "car").
+        bbox: Bounding box coordinates {x1, y1, x2, y2}.
+        previous_detections: Optional list of prior detections for tracking.
+    """
     timestamp: float
     object_class: str
     bbox: dict[str, float]
@@ -14,120 +29,158 @@ class DetectionContext:
 
 
 class AnomalyEngine:
-    def __init__(self) -> None:
-        self._object_history: dict[str, list[dict]] = {}
-        self._restricted_zones: list[dict] = []
+    """Stateless anomaly detection engine with configurable rule sets.
+
+    All detection history is passed via DetectionContext.previous_detections
+    to ensure thread-safe operation across Celery workers.
+    """
+
+    # Class-level configuration for restricted zones
+    # In production, load from database or config file
+    RESTRICTED_ZONES: list[dict] = []
+
+    # Time thresholds (seconds)
+    STATIONARY_THRESHOLD: float = 300.0  # 5 minutes
+    LOITERING_WINDOW: float = 600.0      # 10 minutes
+    LOITERING_COUNT: int = 3
 
     def check_anomaly(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        checks = [
+        """Evaluate all anomaly rules against a detection event.
+
+        Rules are checked in priority order. First match wins.
+
+        Args:
+            ctx: Detection context with current and historical data.
+
+        Returns:
+            Tuple of (is_anomaly, anomaly_type).
+        """
+        rules = [
             self._check_night_intrusion,
             self._check_restricted_zone,
             self._check_abandoned_object,
             self._check_loitering,
         ]
 
-        for check in checks:
-            is_anomaly, anomaly_type = check(ctx)
+        for rule in rules:
+            is_anomaly, anomaly_type = rule(ctx)
             if is_anomaly:
                 return True, anomaly_type
 
-        self._update_history(ctx)
         return False, AnomalyType.NONE
 
     def _check_night_intrusion(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 1: Person detected during night hours (00:00-06:00)"""
+        """Rule 1: Person detected during night hours (00:00-06:00).
+
+        Note: Assumes timestamp is seconds from midnight. In production,
+        use actual recording datetime from video metadata.
+        """
         if ctx.object_class != "person":
             return False, AnomalyType.NONE
 
         hour = int(ctx.timestamp // 3600) % 24
-        # For demo: assume timestamp is seconds from midnight of recording day
-        # In production, use actual datetime from video metadata
         if 0 <= hour < 6:
-            logger.info(f"Night intrusion detected at {ctx.timestamp}s")
+            logger.info(
+                "Night intrusion detected",
+                extra={"timestamp": ctx.timestamp, "hour": hour},
+            )
             return True, AnomalyType.NIGHT_INTRUSION
 
         return False, AnomalyType.NONE
 
     def _check_restricted_zone(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 2: Object enters predefined restricted zone"""
-        if not self._restricted_zones:
+        """Rule 2: Object enters a predefined restricted zone."""
+        if not self.RESTRICTED_ZONES:
             return False, AnomalyType.NONE
 
-        cx = (ctx.bbox["x1"] + ctx.bbox["x2"]) / 2
-        cy = (ctx.bbox["y1"] + ctx.bbox["y2"]) / 2
+        center_x = (ctx.bbox["x1"] + ctx.bbox["x2"]) / 2
+        center_y = (ctx.bbox["y1"] + ctx.bbox["y2"]) / 2
 
-        for zone in self._restricted_zones:
-            if (zone["x1"] <= cx <= zone["x2"] and zone["y1"] <= cy <= zone["y2"]):
-                logger.info(f"Restricted zone entry at {ctx.timestamp}s")
+        for zone in self.RESTRICTED_ZONES:
+            if (
+                zone["x1"] <= center_x <= zone["x2"]
+                and zone["y1"] <= center_y <= zone["y2"]
+            ):
+                logger.info(
+                    "Restricted zone entry detected",
+                    extra={"timestamp": ctx.timestamp, "zone": zone},
+                )
                 return True, AnomalyType.RESTRICTED_ZONE
 
         return False, AnomalyType.NONE
 
     def _check_abandoned_object(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 3: Object stationary for >5 minutes"""
-        stationary_threshold = 300  # 5 minutes in seconds
-        iou_threshold = 0.8
-
-        if ctx.object_class in ["person"]:
+        """Rule 3: Non-person object stationary for >5 minutes."""
+        if ctx.object_class == "person":
             return False, AnomalyType.NONE
 
-        key = f"{ctx.object_class}"
-        history = self._object_history.get(key, [])
+        iou_threshold = 0.8
+        history = [
+            h for h in ctx.previous_detections
+            if h.get("object_class") == ctx.object_class
+        ]
 
         for prev in history:
-            if self._iou(ctx.bbox, prev["bbox"]) > iou_threshold:
+            if self._compute_iou(ctx.bbox, prev["bbox"]) > iou_threshold:
                 elapsed = ctx.timestamp - prev["timestamp"]
-                if elapsed > stationary_threshold:
-                    logger.info(f"Abandoned object detected at {ctx.timestamp}s")
+                if elapsed > self.STATIONARY_THRESHOLD:
+                    logger.info(
+                        "Abandoned object detected",
+                        extra={"timestamp": ctx.timestamp, "elapsed": elapsed},
+                    )
                     return True, AnomalyType.ABANDONED_OBJECT
 
         return False, AnomalyType.NONE
 
     def _check_loitering(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 4: Same person detected 3+ times in 10 minutes"""
+        """Rule 4: Same person detected 3+ times within 10 minutes."""
         if ctx.object_class != "person":
             return False, AnomalyType.NONE
 
-        window = 600  # 10 minutes
-        count_threshold = 3
-
-        key = "person"
-        history = self._object_history.get(key, [])
+        history = [
+            h for h in ctx.previous_detections
+            if h.get("object_class") == "person"
+        ]
 
         recent = [
             h for h in history
-            if ctx.timestamp - h["timestamp"] <= window
+            if ctx.timestamp - h["timestamp"] <= self.LOITERING_WINDOW
         ]
 
-        if len(recent) >= count_threshold - 1:
-            logger.info(f"Suspicious loitering detected at {ctx.timestamp}s")
+        if len(recent) >= self.LOITERING_COUNT - 1:
+            logger.info(
+                "Suspicious loitering detected",
+                extra={
+                    "timestamp": ctx.timestamp,
+                    "detection_count": len(recent) + 1,
+                },
+            )
             return True, AnomalyType.SUSPICIOUS_LOITERING
 
         return False, AnomalyType.NONE
 
-    def _update_history(self, ctx: DetectionContext) -> None:
-        key = ctx.object_class
-        if key not in self._object_history:
-            self._object_history[key] = []
-
-        self._object_history[key].append({
-            "timestamp": ctx.timestamp,
-            "bbox": ctx.bbox,
-        })
-
-        # Keep last 100 entries per class
-        self._object_history[key] = self._object_history[key][-100:]
-
     @staticmethod
-    def _iou(box1: dict, box2: dict) -> float:
-        xi1 = max(box1["x1"], box2["x1"])
-        yi1 = max(box1["y1"], box2["y1"])
-        xi2 = min(box1["x2"], box2["x2"])
-        yi2 = min(box2["y2"], box2["y2"])
+    def _compute_iou(box1: dict, box2: dict) -> float:
+        """Compute Intersection over Union (IoU) for two bounding boxes.
 
-        inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
-        box1_area = (box1["x2"] - box1["x1"]) * (box1["y2"] - box1["y1"])
-        box2_area = (box2["x2"] - box2["x1"]) * (box2["y2"] - box2["y1"])
+        Args:
+            box1: First bounding box {x1, y1, x2, y2}.
+            box2: Second bounding box {x1, y1, x2, y2}.
 
-        union_area = box1_area + box2_area - inter_area
-        return inter_area / union_area if union_area > 0 else 0
+        Returns:
+            IoU score between 0.0 and 1.0.
+        """
+        x_left = max(box1["x1"], box2["x1"])
+        y_top = max(box1["y1"], box2["y1"])
+        x_right = min(box1["x2"], box2["x2"])
+        y_bottom = min(box1["y2"], box2["y2"])
+
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+
+        intersection = (x_right - x_left) * (y_bottom - y_top)
+        area1 = (box1["x2"] - box1["x1"]) * (box1["y2"] - box1["y1"])
+        area2 = (box2["x2"] - box2["x1"]) * (box2["y2"] - box2["y1"])
+
+        union = area1 + area2 - intersection
+        return intersection / union if union > 0 else 0.0

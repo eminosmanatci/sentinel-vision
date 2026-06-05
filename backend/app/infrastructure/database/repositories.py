@@ -96,7 +96,7 @@ class SQLDetectionRepository(DetectionRepository):
             bbox_y2=detection.bbox_y2,
             description=detection.description,
             is_anomaly=detection.is_anomaly,
-            anomaly_type=detection.anomaly_type.value,
+            anomaly_type=detection.anomaly_type.value if detection.anomaly_type else "",
             embedding=detection.embedding,
         )
         self._session.add(model)
@@ -131,7 +131,6 @@ class SQLDetectionRepository(DetectionRepository):
     async def search_similar(
         self, query_embedding: list[float], limit: int = 5
     ) -> list[Detection]:
-        # pgvector cosine similarity search
         result = await self._session.execute(
             select(DetectionModel)
             .order_by(DetectionModel.embedding.cosine_distance(query_embedding))

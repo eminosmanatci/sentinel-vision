@@ -1,3 +1,4 @@
+# docker-compose.yml
 services:
   db:
     image: ankane/pgvector:latest
@@ -35,6 +36,7 @@ services:
     volumes:
       - ./backend:/app
       - uploads:/app/uploads
+      - yolo_cache:/root/.ultralytics  # Cache YOLO models
     ports:
       - "8000:8000"
     environment:
@@ -43,6 +45,42 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ENVIRONMENT=development
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 🆕 CELERY WORKER
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-celery-worker
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend:/app
+      - uploads:/app/uploads
+      - yolo_cache:/root/.ultralytics
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://sentinel:sentinel_secret@db:5432/sentinel_vision
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=development
+    command: celery -A app.infrastructure.tasks.celery_app worker --loglevel=info --concurrency=2
+    restart: unless-stopped
+
+  # 🆕 CELERY BEAT (periodic tasks - optional)
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sentinel-celery-beat
+    depends_on:
+      - redis
+    volumes:
+      - ./backend:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    command: celery -A app.infrastructure.tasks.celery_app beat --loglevel=info
+    restart: unless-stopped
 
   frontend:
     build:
@@ -58,24 +96,7 @@ services:
       - VITE_API_URL=http://localhost:8000
     command: npm run dev
 
-  celery-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: sentinel-celery
-    depends_on:
-      - db
-      - redis
-    volumes:
-      - ./backend:/app
-      - uploads:/app/uploads
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://sentinel:sentinel_secret@db:5432/sentinel_vision
-      - REDIS_URL=redis://redis:6379/0
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ENVIRONMENT=development
-    command: celery -A app.infrastructure.tasks.celery_app worker --loglevel=info --concurrency=2
-
 volumes:
   postgres_data:
   uploads:
+  yolo_cache:  # Persist YOLO model downloads

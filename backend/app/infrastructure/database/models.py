@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Enum as SAEnum
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -41,7 +41,7 @@ class DetectionModel(Base):
     bbox_x2 = Column(Float, nullable=False)
     bbox_y2 = Column(Float, nullable=False)
     description = Column(String(1000), default="")
-    is_anomaly = Column(SAEnum(AnomalyType), default=AnomalyType.NONE)
+    is_anomaly = Column(Boolean, default=False)
     anomaly_type = Column(String(50), default="")
     embedding = Column(Vector(1536), nullable=True)
 

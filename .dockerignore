@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+
+# Node
+node_modules/
+npm-debug.log
+
+# Proje Özel
+uploads/
+yolov8n.pt
+.env

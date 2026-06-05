@@ -25,3 +25,11 @@ RUN mkdir -p /app/uploads
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Fix PyTorch 2.6 weights_only for YOLOv8
+ENV ULTRALYTICS_YOLO_WEIGHTS_DIR=/app/weights
+ENV TORCH_FORCE_WEIGHTS_ONLY_LOAD=false
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,5 +1,4 @@
 from typing import AsyncGenerator
-
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -9,6 +8,8 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.is_development,
     future=True,
+    pool_size=20,
+    max_overflow=0,
 )
 
 AsyncSessionLocal = sessionmaker(
@@ -21,8 +22,9 @@ AsyncSessionLocal = sessionmaker(
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+    """Create a new session per request."""
+    session = AsyncSessionLocal()
+    try:
+        yield session
+    finally:
+        await session.close()
