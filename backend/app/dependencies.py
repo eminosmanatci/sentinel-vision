@@ -9,6 +9,7 @@ from app.infrastructure.database.repositories import (
 from app.infrastructure.database.session import get_db
 from app.repositories.base import DetectionRepository, VideoRepository
 from app.services.processing_service import ProcessingService
+from app.services.rag_service import RAGService
 from app.services.video_service import VideoService
 
 
@@ -35,3 +36,9 @@ async def get_processing_service(
     detection_repo: DetectionRepository = Depends(get_detection_repository),
 ) -> ProcessingService:
     return ProcessingService(video_repo, detection_repo)
+
+
+async def get_rag_service(
+    detection_repo: DetectionRepository = Depends(get_detection_repository),
+) -> RAGService:
+    return RAGService(detection_repo)
