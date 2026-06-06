@@ -1,16 +1,17 @@
-"""Video processing service for SentinelVision AI analytics.
+"""Video processing service with synchronous pipeline execution.
 
-Orchestrates the complete pipeline: frame extraction, object detection,
-description generation, embedding creation, anomaly detection,
-and batched database persistence.
+Orchestrates YOLOv8 detection, OpenAI NLP, anomaly detection,
+and database persistence for security video analytics.
 """
 
+import asyncio
 import os
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 import cv2
+import numpy as np
 
 from app.core.exceptions import ProcessingError
 from app.core.logging import logger
@@ -18,16 +19,11 @@ from app.domain.entities import AnomalyType, Detection, VideoStatus
 from app.infrastructure.ai.anomaly_engine import AnomalyEngine, DetectionContext
 from app.infrastructure.ai.openai_service import OpenAIService
 from app.infrastructure.ai.yolo_service import YOLOService
-from app.infrastructure.database.repositories import (
-    SQLDetectionRepository,
-    SQLVideoRepository,
-)
 
 
 @dataclass(frozen=True)
 class VideoProperties:
-    """Immutable video metadata container."""
-
+    """Immutable video metadata extracted via OpenCV."""
     fps: float
     duration: float
     resolution: str
@@ -35,72 +31,66 @@ class VideoProperties:
 
 
 class ProcessingService:
-    """Service responsible for AI-powered video analysis pipeline.
+    """Video processing pipeline with sync/async repository support."""
 
-    Processes security footage through YOLOv8 detection, OpenAI NLP,
-    vector embeddings, and rule-based anomaly detection.
-    """
+    # Batch size for detection persistence to optimize DB writes
+    DETECTION_BATCH_SIZE: int = 10
+    FRAME_INTERVAL_SECONDS: int = 1
 
     def __init__(
         self,
-        video_repo: SQLVideoRepository,
-        detection_repo: SQLDetectionRepository,
+        video_repo: Any,
+        detection_repo: Any,
+        sync_mode: bool = False,
     ) -> None:
         self._video_repo = video_repo
         self._detection_repo = detection_repo
+        self._sync_mode = sync_mode
         self._yolo = YOLOService()
         self._openai = OpenAIService()
         self._anomaly = AnomalyEngine()
 
-    async def process_video(self, video_id: UUID) -> int:
-        """Execute the full video processing pipeline.
+    def process_video_sync(self, video_id: UUID) -> int:
+        """Execute full processing pipeline synchronously."""
+        logger.info(
+            "Starting video processing pipeline",
+            extra={"video_id": str(video_id), "mode": "sync"},
+        )
 
-        Args:
-            video_id: UUID of the video to process.
-
-        Returns:
-            int: Number of frames processed.
-
-        Raises:
-            ProcessingError: If video file is missing or processing fails.
-        """
-        logger.info("Starting video processing pipeline", extra={"video_id": str(video_id)})
-
-        video = await self._video_repo.get_by_id(video_id)
+        video = self._video_repo.get_by_id(video_id)
         if not video:
             raise ProcessingError(f"Video not found: {video_id}")
 
         if not os.path.exists(video.file_path):
-            raise ProcessingError(f"Video file not found on disk: {video.file_path}")
+            raise ProcessingError(f"Video file missing: {video.file_path}")
 
-        # Update status to processing
         video.mark_processing()
-        await self._video_repo.update(video)
+        self._video_repo.update(video)
 
         try:
             props = self._get_video_properties(video.file_path)
             video.duration_seconds = props.duration
             video.fps = props.fps
             video.resolution = props.resolution
-            await self._video_repo.update(video)
+            self._video_repo.update(video)
 
             frame_count = 0
             batch_detections: list[Detection] = []
 
-            # Process frames with 1-second intervals
             for frame, frame_num, timestamp in self._yolo.extract_frames(
                 video.file_path,
-                interval_seconds=1,
+                interval_seconds=self.FRAME_INTERVAL_SECONDS,
             ):
                 detections = self._yolo.detect_objects(frame)
 
                 if detections:
-                    # Batch OpenAI calls: one per frame, not per detection
-                    description = await self._openai.generate_description(
-                        timestamp=timestamp,
-                        objects=detections,
+                    # Safely run async OpenAI calls inside a sync loop
+                    description, embedding = asyncio.run(
+                        self._get_ai_insights(timestamp, detections)
                     )
-                    embedding = await self._openai.create_embedding(description)
+
+                    if isinstance(embedding, np.ndarray):
+                        embedding = embedding.tolist()
 
                     for det in detections:
                         ctx = DetectionContext(
@@ -110,79 +100,95 @@ class ProcessingService:
                         )
                         is_anomaly, anomaly_type = self._anomaly.check_anomaly(ctx)
 
-                        detection = Detection(
-                            video_id=video_id,
-                            timestamp=timestamp,
-                            frame_number=frame_num,
-                            object_class=det["class_name"],
-                            confidence=det["confidence"],
-                            bbox_x1=det["bbox"]["x1"],
-                            bbox_y1=det["bbox"]["y1"],
-                            bbox_x2=det["bbox"]["x2"],
-                            bbox_y2=det["bbox"]["y2"],
-                            description=description,
-                            is_anomaly=is_anomaly,
-                            anomaly_type=anomaly_type,
-                            embedding=embedding,
+                        batch_detections.append(
+                            Detection(
+                                video_id=video_id,
+                                timestamp=timestamp,
+                                frame_number=frame_num,
+                                object_class=det["class_name"],
+                                confidence=det["confidence"],
+                                bbox_x1=det["bbox"]["x1"],
+                                bbox_y1=det["bbox"]["y1"],
+                                bbox_x2=det["bbox"]["x2"],
+                                bbox_y2=det["bbox"]["y2"],
+                                description=description,
+                                is_anomaly=is_anomaly,
+                                anomaly_type=anomaly_type,
+                                embedding=embedding,
+                            )
                         )
-                        batch_detections.append(detection)
 
                 frame_count += 1
 
-                # Batch insert every 10 frames to reduce DB round-trips
-                if len(batch_detections) >= 10:
-                    await self._detection_repo.create_batch(batch_detections)
+                if len(batch_detections) >= self.DETECTION_BATCH_SIZE:
+                    self._flush_detections(batch_detections)
                     batch_detections.clear()
 
-            # Insert remaining detections
+            # Flush remaining detections
             if batch_detections:
-                await self._detection_repo.create_batch(batch_detections)
+                self._flush_detections(batch_detections)
 
-            # Mark video as completed
             video.mark_completed()
-            await self._video_repo.update(video)
+            self._video_repo.update(video)
 
             logger.info(
-                "Video processing completed successfully",
+                "Pipeline completed successfully",
                 extra={
                     "video_id": str(video_id),
                     "frames_processed": frame_count,
-                    "total_detections": frame_count,  # Approximate
                 },
             )
             return frame_count
 
         except Exception as exc:
-            logger.error(
-                f"Video processing failed: {exc}",
-                extra={"video_id": str(video_id)},
-                exc_info=True,
-            )
+            logger.error(f"Pipeline failed: {exc}", exc_info=True)
             video.mark_failed()
-            await self._video_repo.update(video)
+            self._video_repo.update(video)
             raise ProcessingError(f"Video processing failed: {exc}") from exc
 
+    async def _get_ai_insights(self, timestamp: float, detections: list) -> tuple[str, list]:
+        """Helper to run OpenAI requests concurrently for faster processing."""
+        # Use asyncio.gather to call description and embedding concurrently if needed,
+        # but since embedding requires description, we await them sequentially here.
+        description = await self._openai.generate_description(timestamp, detections)
+        embedding = await self._openai.create_embedding(description)
+        return description, embedding
+
     def _get_video_properties(self, video_path: str) -> VideoProperties:
-        """Extract video metadata using OpenCV.
-
-        Args:
-            video_path: Path to the video file.
-
-        Returns:
-            VideoProperties with fps, duration, resolution, and frame count.
-        """
+        """Extract video metadata using OpenCV."""
         cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ProcessingError(f"Cannot open video: {video_path}")
+
         try:
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+            if fps <= 0:
+                fps = 30.0
+
             return VideoProperties(
                 fps=fps,
-                duration=total_frames / fps if fps > 0 else 0.0,
+                duration=total_frames / fps,
                 resolution=f"{width}x{height}",
                 total_frames=total_frames,
             )
         finally:
             cap.release()
+
+    def _flush_detections(self, detections: list[Detection]) -> None:
+        """Persist detection batch with error handling."""
+        if not detections:
+            return
+
+        try:
+            inserted = self._detection_repo.create_batch(detections)
+            logger.debug(
+                "Detection batch flushed",
+                extra={"batch_size": inserted},
+            )
+        except Exception as exc:
+            logger.error(f"Failed to flush detection batch: {exc}")
+            raise

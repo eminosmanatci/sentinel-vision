@@ -43,6 +43,7 @@ class AnomalyEngine:
     STATIONARY_THRESHOLD: float = 300.0  # 5 minutes
     LOITERING_WINDOW: float = 600.0      # 10 minutes
     LOITERING_COUNT: int = 3
+    LOITERING_IOU_THRESHOLD: float = 0.3 # Lower threshold to account for slight movement
 
     def check_anomaly(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
         """Evaluate all anomaly rules against a detection event.
@@ -70,11 +71,7 @@ class AnomalyEngine:
         return False, AnomalyType.NONE
 
     def _check_night_intrusion(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 1: Person detected during night hours (00:00-06:00).
-
-        Note: Assumes timestamp is seconds from midnight. In production,
-        use actual recording datetime from video metadata.
-        """
+        """Rule 1: Person detected during night hours (00:00-06:00)."""
         if ctx.object_class != "person":
             return False, AnomalyType.NONE
 
@@ -133,7 +130,7 @@ class AnomalyEngine:
         return False, AnomalyType.NONE
 
     def _check_loitering(self, ctx: DetectionContext) -> tuple[bool, AnomalyType]:
-        """Rule 4: Same person detected 3+ times within 10 minutes."""
+        """Rule 4: Person staying in the same general area for 10+ minutes."""
         if ctx.object_class != "person":
             return False, AnomalyType.NONE
 
@@ -142,17 +139,19 @@ class AnomalyEngine:
             if h.get("object_class") == "person"
         ]
 
-        recent = [
+        # Filter history for people in the SAME general location within the time window
+        recent_in_area = [
             h for h in history
-            if ctx.timestamp - h["timestamp"] <= self.LOITERING_WINDOW
+            if (ctx.timestamp - h["timestamp"] <= self.LOITERING_WINDOW) and 
+               (self._compute_iou(ctx.bbox, h["bbox"]) > self.LOITERING_IOU_THRESHOLD)
         ]
 
-        if len(recent) >= self.LOITERING_COUNT - 1:
+        if len(recent_in_area) >= self.LOITERING_COUNT - 1:
             logger.info(
                 "Suspicious loitering detected",
                 extra={
                     "timestamp": ctx.timestamp,
-                    "detection_count": len(recent) + 1,
+                    "detection_count": len(recent_in_area) + 1,
                 },
             )
             return True, AnomalyType.SUSPICIOUS_LOITERING
@@ -161,15 +160,7 @@ class AnomalyEngine:
 
     @staticmethod
     def _compute_iou(box1: dict, box2: dict) -> float:
-        """Compute Intersection over Union (IoU) for two bounding boxes.
-
-        Args:
-            box1: First bounding box {x1, y1, x2, y2}.
-            box2: Second bounding box {x1, y1, x2, y2}.
-
-        Returns:
-            IoU score between 0.0 and 1.0.
-        """
+        """Compute Intersection over Union (IoU) for two bounding boxes."""
         x_left = max(box1["x1"], box2["x1"])
         y_top = max(box1["y1"], box2["y1"])
         x_right = min(box1["x2"], box2["x2"])
