@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System dependencies for OpenCV (Debian trixie compatible)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gosu \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -12,21 +12,23 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
+RUN pip install --upgrade pip
+
+RUN pip install --no-cache-dir \
+    torch==2.2.0+cpu \
+    torchvision==0.17.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Application
 COPY . .
 
-# Create upload directory
-RUN mkdir -p /app/uploads
+RUN addgroup --system appgroup && adduser --system --group appuser
+RUN chown -R appuser:appgroup /app && mkdir -p /app/uploads && chown appuser:appgroup /app/uploads
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
-# Fix PyTorch 2.6 weights_only for YOLOv8
 ENV ULTRALYTICS_YOLO_WEIGHTS_DIR=/app/weights
 ENV TORCH_FORCE_WEIGHTS_ONLY_LOAD=false
 
