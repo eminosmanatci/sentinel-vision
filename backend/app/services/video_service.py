@@ -15,6 +15,7 @@ class VideoService:
 
     async def create_upload(self, filename: str) -> Video:
         video_id = uuid4()
+        # İndirme klasörünü oluştur
         upload_dir = Path(settings.UPLOAD_DIR) / str(video_id)
         upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -38,9 +39,12 @@ class VideoService:
         return await self._repo.list_all(limit=limit, offset=offset)
 
     def validate_file(self, filename: str, size: int) -> None:
+        # Uzantı kontrolü
         ext = Path(filename).suffix.lower()
         if ext not in settings.SUPPORTED_VIDEO_FORMATS:
             raise ValidationError(f"Unsupported format: {ext}. Use: {settings.SUPPORTED_VIDEO_FORMATS}")
 
-        if size > settings.MAX_UPLOAD_SIZE:
-            raise ValidationError(f"File too large: {size} bytes. Max: {settings.MAX_UPLOAD_SIZE}")
+        # Boyut kontrolü (varsayılan 500MB)
+        max_size = getattr(settings, 'MAX_UPLOAD_SIZE', 500 * 1024 * 1024)
+        if size > max_size:
+            raise ValidationError(f"File too large: {size} bytes. Max: {max_size} bytes")
